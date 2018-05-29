@@ -35,10 +35,18 @@
 #define IMX274_MAX_COARSE_DIFF		10
 
 #define IMX274_GAIN_SHIFT		8
-#define IMX274_MIN_GAIN		(1 << IMX274_GAIN_SHIFT)
-#define IMX274_MAX_GAIN		(23 << IMX274_GAIN_SHIFT)
+#define IMX274_GAIN_REG_MAX			(1957)
+#define IMX274_GAIN_SHIFT_MASK			((1 << IMX274_GAIN_SHIFT) - 1)
+#define IMX274_MAX_DIGITAL_GAIN			(8)
+#define IMX274_MAX_ANALOG_GAIN			(2048 / (2048 - IMX274_GAIN_REG_MAX))
+#define IMX274_GAIN_CONST			(2048) /* for gain formula */
+
+
+
+#define IMX274_MIN_GAIN		(1)
+#define IMX274_MAX_GAIN		(180)
 #define IMX274_MIN_FRAME_LENGTH	(0x8ED)
-#define IMX274_MAX_FRAME_LENGTH	(0xFFFF)
+#define IMX274_MAX_FRAME_LENGTH	(0xB292)
 #define IMX274_MIN_EXPOSURE_COARSE	(0x0001)
 #define IMX274_MAX_EXPOSURE_COARSE	\
 	(IMX274_MAX_FRAME_LENGTH-IMX274_MAX_COARSE_DIFF)
@@ -50,13 +58,36 @@
 
 #define IMX274_DEFAULT_MODE	IMX274_MODE_3840X2160
 
-#define IMX274_DEFAULT_WIDTH	3840
-#define IMX274_DEFAULT_HEIGHT	2160
+#define IMX274_DEFAULT_WIDTH	3864
+#define IMX274_DEFAULT_HEIGHT	2174
 #define IMX274_DEFAULT_DATAFMT	MEDIA_BUS_FMT_SRGGB10_1X10
 #define IMX274_DEFAULT_CLK_FREQ	24000000
-#define IMX274_1080P_MODE_HMAX			260
-#define IMX274_1080P_MODE_MIN_VMAX		4620
-#define IMX274_1080P_MODE_OFFSET		112
+/*
+ * shift and mask constants
+ */
+#define IMX274_SHIFT_8_BITS			(8)
+#define IMX274_SHIFT_16_BITS			(16)
+#define IMX274_MASK_LSB_2_BITS			(0x03)
+#define IMX274_MASK_LSB_3_BITS			(0x07)
+#define IMX274_MASK_LSB_4_BITS			(0x0f)
+#define IMX274_MASK_LSB_8_BITS			(0x00ff)
+
+
+#define IMX274_FRAME_LENGTH_ADDR_1		0x30FA /* VMAX, MSB */
+#define IMX274_FRAME_LENGTH_ADDR_2		0x30F9 /* VMAX */
+#define IMX274_FRAME_LENGTH_ADDR_3		0x30F8 /* VMAX, LSB */
+#define IMX274_SVR_REG_MSB			0x300F /* SVR */
+#define IMX274_SVR_REG_LSB			0x300E /* SVR */
+#define IMX274_HMAX_REG_MSB			0x30F7 /* HMAX */
+#define IMX274_HMAX_REG_LSB			0x30F6 /* HMAX */
+#define IMX274_COARSE_TIME_ADDR_MSB		0x300D /* SHR */
+#define IMX274_COARSE_TIME_ADDR_LSB		0x300C /* SHR */
+#define IMX274_ANALOG_GAIN_ADDR_LSB		0x300A /* ANALOG GAIN LSB */
+#define IMX274_ANALOG_GAIN_ADDR_MSB		0x300B /* ANALOG GAIN MSB */
+#define IMX274_DIGITAL_GAIN_REG			0x3012 /* Digital Gain */
+#define IMX274_VFLIP_REG			0x301A /* VERTICAL FLIP */
+#define IMX274_STANDBY_REG			0x3000 /* STANDBY */
+
 
 struct imx274 {
 	struct camera_common_power_rail	power;
@@ -65,7 +96,8 @@ struct imx274 {
 	struct i2c_client		*i2c_client;
 	struct v4l2_subdev		*subdev;
 	struct media_pad		pad;
-	u32				vmax;
+	u32	frame_length;
+
 	s32				group_hold_prev;
 	bool				group_hold_en;
 	struct regmap			*regmap;
@@ -95,9 +127,9 @@ static struct v4l2_ctrl_config ctrl_config_list[] = {
 		.name = "Gain",
 		.type = V4L2_CTRL_TYPE_INTEGER,
 		.flags = V4L2_CTRL_FLAG_SLIDER,
-		.min = IMX274_MIN_GAIN,
-		.max = IMX274_MAX_GAIN,
-		.def = IMX274_DEFAULT_GAIN,
+		.min = IMX274_MIN_GAIN * 100,
+		.max = IMX274_MAX_GAIN * 100,
+		.def = IMX274_DEFAULT_GAIN * 100,
 		.step = 1,
 	},
 	{
@@ -161,11 +193,9 @@ static inline void imx274_get_vmax_regs(imx274_reg *regs,
 				u32 vmax)
 {
 	regs->addr = IMX274_VMAX_ADDR_MSB;
-	regs->val = (vmax >> 16) & 0x0f;
-	(regs + 1)->addr = IMX274_VMAX_ADDR_MID;
-	(regs + 1)->val = (vmax >> 8) & 0xff;
-	(regs + 2)->addr = IMX274_VMAX_ADDR_LSB;
-	(regs + 2)->val = (vmax) & 0xff;
+	regs->val = (vmax >> 8) & 0xff;
+	(regs + 1)->addr = IMX274_VMAX_ADDR_LSB;
+	(regs + 1)->val = (vmax) & 0xff;
 }
 
 static inline void imx274_get_shr_regs(imx274_reg *regs,
@@ -243,11 +273,11 @@ static int imx274_power_on(struct camera_common_data *s_data)
 	}
 
 	if (pw->reset_gpio)
-		gpio_set_value(pw->reset_gpio, 0);
+		gpio_direction_output(pw->reset_gpio, 0);
 	if (pw->af_gpio)
-		gpio_set_value(pw->af_gpio, 1);
+		gpio_direction_output(pw->af_gpio, 1);
 	if (pw->pwdn_gpio)
-		gpio_set_value(pw->pwdn_gpio, 0);
+		gpio_direction_output(pw->pwdn_gpio, 0);
 	usleep_range(10, 20);
 
 
@@ -268,9 +298,9 @@ static int imx274_power_on(struct camera_common_data *s_data)
 
 	usleep_range(1, 2);
 	if (pw->reset_gpio)
-		gpio_set_value(pw->reset_gpio, 1);
+		gpio_direction_output(pw->reset_gpio, 1);
 	if (pw->pwdn_gpio)
-		gpio_set_value(pw->pwdn_gpio, 1);
+		gpio_direction_output(pw->pwdn_gpio, 1);
 
 	usleep_range(300, 310);
 
@@ -279,7 +309,7 @@ static int imx274_power_on(struct camera_common_data *s_data)
 
 imx274_dvdd_fail:
 	if (pw->af_gpio)
-		gpio_set_value(pw->af_gpio, 0);
+		gpio_direction_output(pw->af_gpio, 0);
 
 imx274_iovdd_fail:
 	regulator_disable(pw->dvdd);
@@ -311,11 +341,11 @@ static int imx274_power_off(struct camera_common_data *s_data)
 
 	usleep_range(1, 2);
 	if (pw->reset_gpio)
-		gpio_set_value(pw->reset_gpio, 0);
+		gpio_direction_output(pw->reset_gpio, 0);
 	if (pw->af_gpio)
-		gpio_set_value(pw->af_gpio, 0);
+		gpio_direction_output(pw->af_gpio, 0);
 	if (pw->pwdn_gpio)
-		gpio_set_value(pw->pwdn_gpio, 0);
+		gpio_direction_output(pw->pwdn_gpio, 0);
 	usleep_range(1, 2);
 
 	if (pw->avdd)
@@ -413,7 +443,7 @@ static int imx274_s_stream(struct v4l2_subdev *sd, int enable)
 	struct v4l2_control control;
 	int err;
 
-	dev_dbg(&client->dev, "%s++\n", __func__);
+    dev_dbg(&client->dev, "%s++,enable:%d\n", __func__,enable);
 
 	imx274_write_table(priv, mode_table[IMX274_MODE_STOP_STREAM]);
 
@@ -565,96 +595,151 @@ fail:
 	return err;
 }
 
+static inline void imx274_calculate_gain_regs(imx274_reg *regs, u16 gain)
+{
+	regs->addr = IMX274_ANALOG_GAIN_ADDR_MSB;
+	regs->val = (gain >> IMX274_SHIFT_8_BITS) & IMX274_MASK_LSB_3_BITS;
+
+	(regs + 1)->addr = IMX274_ANALOG_GAIN_ADDR_LSB;
+	(regs + 1)->val = (gain) & IMX274_MASK_LSB_8_BITS;
+}
+
+
+/*
+ * imx274_set_digital gain - Function called when setting digital gain
+ * @priv: Pointer to device structure
+ * @dgain: Value of digital gain.
+ *
+ * Digital gain has only 4 steps: 1x, 2x, 4x, and 8x
+ *
+ * Return: 0 on success
+ */
+static int imx274_set_digital_gain(struct imx274 *priv, u32 dgain)
+{
+	int ret;
+	u8 reg_val;
+
+	switch (dgain) {
+	case 1:
+		reg_val = 0;
+		break;
+	case 2:
+		reg_val = 1;
+		break;
+	case 4:
+		reg_val = 2;
+		break;
+	case 8:
+		reg_val = 3;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	ret = imx274_write_reg(priv->s_data, IMX274_DIGITAL_GAIN_REG,
+			       reg_val & IMX274_MASK_LSB_4_BITS);
+	return ret;
+}
+
+
 static int imx274_set_gain(struct imx274 *priv, s32 val)
 {
+
 	imx274_reg reg_list[2];
 	int err;
-	int i = 0;
-	u16 gain;
+	u32 gain, analog_gain, digital_gain, gain_reg;
+	int i;
 
-	dev_dbg(&priv->i2c_client->dev,
-		"%s: val: %d\n", __func__, val);
+	gain = val / 100;
 
-	if (val < IMX274_MIN_GAIN)
-		val = IMX274_MIN_GAIN;
-	else if (val > IMX274_MAX_GAIN)
-		val = IMX274_MAX_GAIN;
+	dev_dbg(&priv->i2c_client->dev,	
+		 "%s : input gain = %d.%d\n", __func__,
+		 gain >> IMX274_GAIN_SHIFT,
+		 ((gain & IMX274_GAIN_SHIFT_MASK) * 100) >> IMX274_GAIN_SHIFT);
 
-	gain = 2048 - (2048 * IMX274_MIN_GAIN / val);
+	if (gain > IMX274_MAX_DIGITAL_GAIN * IMX274_MAX_ANALOG_GAIN)
+		gain = IMX274_MAX_DIGITAL_GAIN * IMX274_MAX_ANALOG_GAIN;
+	else if (gain < IMX274_MIN_GAIN)
+		gain = IMX274_MIN_GAIN;
 
-	imx274_get_gain_reg(reg_list, gain);
-	imx274_set_group_hold(priv);
+	if (gain <= IMX274_MAX_ANALOG_GAIN)
+		digital_gain = 1;
+	else if (gain <= IMX274_MAX_ANALOG_GAIN * 2)
+		digital_gain = 2;
+	else if (gain <= IMX274_MAX_ANALOG_GAIN * 4)
+		digital_gain = 4;
+	else
+		digital_gain = IMX274_MAX_DIGITAL_GAIN;
 
-	/* writing analog gain */
-	for (i = 0; i < 2; i++) {
+	analog_gain = val / digital_gain;
+
+	dev_dbg(&priv->i2c_client->dev,	
+		 "%s : digital gain = %d, analog gain = %d\n",
+		 __func__, digital_gain, analog_gain);
+
+	err = imx274_set_digital_gain(priv, digital_gain);
+	if (err)
+		goto fail;
+
+	/* convert to register value, refer to imx274 datasheet */
+	gain_reg = (u32)IMX274_GAIN_CONST -
+		(IMX274_GAIN_CONST * 100) / analog_gain;
+	if (gain_reg > IMX274_GAIN_REG_MAX)
+		gain_reg = IMX274_GAIN_REG_MAX;
+
+	imx274_calculate_gain_regs(reg_list, (u16)gain_reg);
+
+	for (i = 0; i < ARRAY_SIZE(reg_list); i++) {
 		err = imx274_write_reg(priv->s_data, reg_list[i].addr,
-			 reg_list[i].val);
+				       reg_list[i].val);
 		if (err)
 			goto fail;
 	}
 
+
 	return 0;
 
 fail:
-	dev_dbg(&priv->i2c_client->dev,
-		 "%s: GAIN control error\n", __func__);
 	return err;
 }
 
 static int imx274_set_frame_length(struct imx274 *priv, s32 val)
 {
-	struct camera_common_data *s_data = priv->s_data;
-	const struct sensor_mode_properties *mode =
-		&s_data->sensor_props.sensor_modes[s_data->mode];
-	imx274_reg reg_list[3];
+	imx274_reg reg_list[2];
 	int err;
 	u32 frame_length;
 	u32 frame_rate;
 	int i = 0;
+	u8 svr;
+	u32 vmax;
 
 	dev_dbg(&priv->i2c_client->dev,
 		 "%s: val: %u\n", __func__, val);
 
 	frame_length = (u32)val;
 
-	frame_rate = (u32)(mode->signal_properties.pixel_clock.val /
-			(u32)(frame_length *
-			mode->image_properties.line_length));
+	frame_rate = (u32)(IMX274_PIXEL_CLK_HZ /
+				(u32)(frame_length * IMX274_LINE_LENGTH));
 
-	if (s_data->mode == IMX274_MODE_1920X1080) {
-		priv->vmax = (u32)(IMX274_SENSOR_INTERNAL_CLK_FREQ /
-				(frame_rate *
-				IMX274_1080P_MODE_HMAX));
-		if (priv->vmax < IMX274_1080P_MODE_MIN_VMAX)
-			priv->vmax = IMX274_1080P_MODE_MIN_VMAX;
-	} else {
-	/*For 4K mode*/
-	priv->vmax = (u32)(IMX274_SENSOR_INTERNAL_CLK_FREQ /
-			(frame_rate *
-			IMX274_4K_MODE_HMAX));
-		if (priv->vmax < IMX274_4K_MODE_MIN_VMAX)
-			priv->vmax = IMX274_4K_MODE_MIN_VMAX;
-	}
+	imx274_read_reg(priv->s_data, IMX274_SVR_ADDR, &svr);
 
-	imx274_get_vmax_regs(reg_list, priv->vmax);
+	vmax = (u32)(72000000 /
+			(u32)(frame_rate * IMX274_HMAX * (svr + 1))) - 12;
+
+	imx274_get_vmax_regs(reg_list, vmax);
 
 	imx274_set_group_hold(priv);
 
-	for (i = 0; i < 3; i++) {
+	for (i = 0; i < 2; i++) {
 		err = imx274_write_reg(priv->s_data, reg_list[i].addr,
 			 reg_list[i].val);
 		if (err)
 			goto fail;
 	}
+	priv->frame_length = vmax;
 
 	dev_dbg(&priv->i2c_client->dev,
-		"%s: PCLK: %lld, FL: %d, LL: %d, fps: %d, VMAX: %d\n", __func__,
-			mode->signal_properties.pixel_clock.val,
-			frame_length,
-			mode->image_properties.line_length,
-			frame_rate,
-			priv->vmax);
-
+		"%s: frame_rate: %d vmax: %u\n", __func__, frame_rate, vmax);
 	return 0;
 
 fail:
@@ -665,54 +750,37 @@ fail:
 
 static int imx274_calculate_shr(struct imx274 *priv, u32 rep)
 {
-	const struct camera_common_data *s_data = priv->s_data;
-	const struct sensor_mode_properties *mode =
-		&s_data->sensor_props.sensor_modes[s_data->mode];
+	u8 svr;
 	int shr;
-	int shr_min;
-	int shr_max;
-	u64 et_long;
+	int min;
+	int max;
+	u8 vmax_l;
+	u8 vmax_m;
+	u32 vmax;
 
-	if (priv->vmax < IMX274_4K_MODE_MIN_VMAX)
-		priv->vmax = IMX274_4K_MODE_MIN_VMAX;
+	imx274_read_reg(priv->s_data, IMX274_SVR_ADDR, &svr);
 
-	et_long = mode->image_properties.line_length * rep *
-		FIXED_POINT_SCALING_FACTOR /
-		mode->signal_properties.pixel_clock.val;
+	imx274_read_reg(priv->s_data, IMX274_VMAX_ADDR_LSB, &vmax_l);
+	imx274_read_reg(priv->s_data, IMX274_VMAX_ADDR_MSB, &vmax_m);
 
-	if (s_data->mode == IMX274_MODE_1920X1080) {
-		et_long = mode->image_properties.line_length * rep *
-			FIXED_POINT_SCALING_FACTOR /
-			mode->signal_properties.pixel_clock.val;
+	vmax = ((vmax_m << 8) + vmax_l);
 
-		shr = priv->vmax  -
-			(et_long * IMX274_SENSOR_INTERNAL_CLK_FREQ /
-			FIXED_POINT_SCALING_FACTOR  -
-			IMX274_1080P_MODE_OFFSET) /
-			IMX274_1080P_MODE_HMAX;
+	min = IMX274_MODE1_SHR_MIN;
+	//max = ((svr + 1) * IMX274_VMAX) - 4;
+	max = ((svr + 1) * priv->frame_length) - 4;
+	
+	shr = vmax * (svr + 1) -
+			(rep * IMX274_ET_FACTOR - IMX274_MODE1_OFFSET) /
+			IMX274_HMAX;
 
-		if (shr > priv->vmax - 4)
-			shr = priv->vmax - 4;
-		if (shr < 8)
-			shr = 8;
-	} else {
-		/*For 4K mode*/
-		shr = priv->vmax -
-			(et_long * IMX274_SENSOR_INTERNAL_CLK_FREQ /
-			FIXED_POINT_SCALING_FACTOR -
-			IMX274_4K_MODE_OFFSET) /
-			IMX274_4K_MODE_HMAX;
+	if (shr < min)
+		shr = min;
 
-		shr_min = 12;
-		shr_max = priv->vmax - 4;
-		if (shr > shr_max)
-			shr = shr_max;
+	if (shr > max)
+		shr = max;
 
-		if (shr < shr_min)
-			shr = shr_min;
-	}
 	dev_dbg(&priv->i2c_client->dev,
-		 "%s: shr: %u vmax: %d\n", __func__, shr, priv->vmax);
+		 "%s: shr: %u vmax: %d\n", __func__, shr, vmax);
 	return shr;
 }
 
@@ -746,25 +814,6 @@ static int imx274_set_coarse_time(struct imx274 *priv, s32 val)
 fail:
 	dev_dbg(&priv->i2c_client->dev,
 		 "%s: COARSE_TIME control error\n", __func__);
-	return err;
-}
-
-static int imx274_verify_streaming(struct imx274 *priv)
-{
-	int err = 0;
-
-	err = camera_common_s_power(priv->subdev, true);
-	if (err)
-		return err;
-
-	err = imx274_s_stream(priv->subdev, true);
-	if (err)
-		goto error;
-
-error:
-	imx274_s_stream(priv->subdev, false);
-	camera_common_s_power(priv->subdev, false);
-
 	return err;
 }
 
@@ -1016,9 +1065,6 @@ static int imx274_probe(struct i2c_client *client,
 	if (err)
 		return err;
 
-	err = imx274_verify_streaming(priv);
-	if (err)
-		return err;
 
 	priv->subdev->internal_ops = &imx274_subdev_internal_ops;
 	priv->subdev->flags |= V4L2_SUBDEV_FL_HAS_DEVNODE |
