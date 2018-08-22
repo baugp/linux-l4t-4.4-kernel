@@ -737,6 +737,7 @@ static struct reg_8 mode_4056X3040[] = {
         {IMX378_TABLE_WAIT_MS, 10},
         /* software reset */
         {0x0103, 0x01},
+        {IMX378_TABLE_WAIT_MS, IMX378_WAIT_MS},
         EXTERNAL_CLOCK
         GLOBAL_SETTING_HEADER
         IMAGE_QUALITY_SETTING
@@ -772,6 +773,7 @@ static imx378_reg mode_3840X2160[] = {
         {IMX378_TABLE_WAIT_MS, 10},
         /* software reset */
         {0x0103, 0x01},
+        {IMX378_TABLE_WAIT_MS, IMX378_WAIT_MS},
         EXTERNAL_CLOCK
         GLOBAL_SETTING_HEADER
         IMAGE_QUALITY_SETTING
@@ -807,6 +809,7 @@ static struct reg_8 mode_1920X1080[] = {
         {IMX378_TABLE_WAIT_MS, 10},
         /* software reset */
         {0x0103, 0x01},
+        {IMX378_TABLE_WAIT_MS, IMX378_WAIT_MS},
         EXTERNAL_CLOCK
         GLOBAL_SETTING_HEADER
         IMAGE_QUALITY_SETTING
@@ -842,6 +845,7 @@ static struct reg_8 mode_640X480[] = {
         {IMX378_TABLE_WAIT_MS, 10},
         /* software reset */
         {0x0103, 0x01},
+        {IMX378_TABLE_WAIT_MS, IMX378_WAIT_MS},
         EXTERNAL_CLOCK
         GLOBAL_SETTING_HEADER
         IMAGE_QUALITY_SETTING
